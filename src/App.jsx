@@ -12,7 +12,7 @@ const generateAIHint = async (levelDescription, userQuery, dbSchema) => {
   }
 
   // 2. Fix Modello 404: Utilizzo del modello stabile gemini-1.5-flash
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
   
   const prompt = `L'obiettivo del livello è: "${levelDescription}". 
 Lo schema del database attuale contiene le tabelle: ${dbSchema}.
