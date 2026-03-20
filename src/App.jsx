@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Play, HelpCircle, Database, Table as TableIcon, CheckCircle, XCircle, ChevronRight, Key, Sparkles, Terminal, BookOpen, ArrowRight, Bot, Loader2, Trophy, Star, Award, Copy, Network, Info, LayoutGrid, PlayCircle, ListFilter } from 'lucide-react';
 
 // --- INTEGRAZIONE GEMINI API ---
-const apiKey = ""; // Viene popolata dall'ambiente di esecuzione
+const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
 const generateAIHint = async (levelDescription, userQuery, dbSchema) => {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
