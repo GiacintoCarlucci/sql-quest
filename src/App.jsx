@@ -5,7 +5,14 @@ import { Play, HelpCircle, Database, Table as TableIcon, CheckCircle, XCircle, C
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
 const generateAIHint = async (levelDescription, userQuery, dbSchema) => {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+  // 1. Controllo di sicurezza: se la chiave manca, avvisa senza rompere l'app
+  if (!apiKey) {
+    console.error("VITE_GEMINI_API_KEY mancante.");
+    return "Attenzione: Il Tutor AI non è configurato. Inserisci la chiave API nelle variabili d'ambiente di Vercel o nel file .env locale!";
+  }
+
+  // 2. Fix Modello 404: Utilizzo del modello stabile gemini-1.5-flash
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   
   const prompt = `L'obiettivo del livello è: "${levelDescription}". 
 Lo schema del database attuale contiene le tabelle: ${dbSchema}.
@@ -29,10 +36,16 @@ REGOLA FONDAMENTALE: NON scrivere mai la query corretta nella tua risposta. Usa 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(`Errore API: ${res.status} - ${errData?.error?.message || 'Sconosciuto'}`);
+      }
+      
       const data = await res.json();
       return data.candidates?.[0]?.content?.parts?.[0]?.text || "Nessuna risposta generata dal tutor.";
     } catch (error) {
+      console.error("Tentativo Fallito:", error);
       if (i === 4) return "Si è verificato un errore di connessione col Tutor AI. Riprova più tardi!";
       await new Promise(r => setTimeout(r, delay));
       delay *= 2;
