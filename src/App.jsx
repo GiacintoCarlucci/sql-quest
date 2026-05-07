@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, HelpCircle, Database, Table as TableIcon, CheckCircle, XCircle, ChevronRight, Key, Sparkles, Terminal, BookOpen, ArrowRight, Bot, Loader2, Trophy, Star, Award, Copy, Network, Info, LayoutGrid, PlayCircle, ListFilter } from 'lucide-react';
+import { INITIAL_DB, SQL_MODULES, getDbForMacro } from './data/sqlModules.jsx';
+import { THEORY_MODULES } from './data/theoryModules.jsx';
 
 // --- INTEGRAZIONE GEMINI API ---
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
-const generateAIHint = async (levelDescription, userQuery, dbSchema) => {
+const generateAIHint = async (levelDescription, userQuery, dbSchema, levelType = 'query') => {
   // 1. Controllo di sicurezza: se la chiave manca, avvisa senza rompere l'app
   if (!apiKey) {
     console.error("VITE_GEMINI_API_KEY mancante.");
@@ -14,7 +16,13 @@ const generateAIHint = async (levelDescription, userQuery, dbSchema) => {
   // 2. Fix Modello 404: Utilizzo del modello stabile gemini-1.5-flash
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
   
-  const prompt = `L'obiettivo del livello è: "${levelDescription}". 
+  const prompt = levelType === 'quiz'
+    ? `La domanda del quiz è: "${levelDescription}".
+Lo studente ha risposto: "${userQuery || 'nessuna risposta selezionata'}".
+La risposta non è corretta o lo studente chiede aiuto.
+Dai un suggerimento utile per ragionare sull'argomento.
+REGOLA FONDAMENTALE: NON scrivere mai la risposta corretta e non indicare quale opzione scegliere. Usa un tono incoraggiante e scrivi massimo 3 o 4 frasi brevi.`
+    : `L'obiettivo del livello è: "${levelDescription}". 
 Lo schema del database attuale contiene le tabelle: ${dbSchema}.
 Lo studente ha scritto questa query SQL: "${userQuery}".
 Tuttavia, la query non è corretta o non raggiunge l'obiettivo.
@@ -53,236 +61,16 @@ REGOLA FONDAMENTALE: NON scrivere mai la query corretta nella tua risposta. Usa 
   }
 };
 
-// --- CONFIGURAZIONE LIVELLI & MACRO-LIVELLI ---
-const normalize = (q) => q.toLowerCase().replace(/\s+/g, ' ').replace(/;/g, '').trim();
+const MACRO_LEVELS = [...SQL_MODULES, ...THEORY_MODULES];
 
-const MACRO_LEVELS = [
-  {
-    id: 'macro_1',
-    title: "Fondamenti SQL",
-    description: "Impara a estrarre dati, selezionare colonne e applicare filtri numerici e testuali semplici.",
-    icon: <Database size={32} className="text-blue-400" />,
-    color: "from-blue-900 to-blue-950",
-    borderColor: "border-blue-500/30",
-    levels: [
-      {
-        id: 1, title: "Esplorazione Dati",
-        description: "Benvenuto nel database dell'azienda! Iniziamo dalle basi. Scrivi una query per estrarre TUTTI i dati dalla tabella 'dipendenti'.",
-        hint: { title: "Il comando SELECT", theory: "Usa SELECT * per estrarre tutte le colonne da una tabella specifica.", example: "SELECT * FROM nome_tabella;" },
-        validate: (q) => normalize(q) === "select * from dipendenti",
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti, message: "Ottimo! Hai recuperato tutti i record." })
-      },
-      {
-        id: 2, title: "Selezione Specifica",
-        description: "Spesso non ci servono tutti i dati. Estrai SOLO le colonne 'nome' e 'ruolo' dalla tabella 'dipendenti'.",
-        hint: { title: "Proiezione", theory: "Al posto dell'asterisco, elenca i nomi delle colonne separati da virgola.", example: "SELECT colonna1, colonna2 FROM tabella;" },
-        validate: (q) => { const n = normalize(q); return n.includes("select") && n.includes("nome") && n.includes("ruolo") && n.includes("from dipendenti"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.map(d => ({ nome: d.nome, ruolo: d.ruolo })), message: "Perfetto! Hai filtrato le colonne." })
-      },
-      {
-        id: 3, title: "Filtri Numerici",
-        description: "Vogliamo trovare i dipendenti con lo stipendio più alto. Mostra tutti i dati dei dipendenti che hanno uno 'stipendio' maggiore di 2500.",
-        hint: { title: "La clausola WHERE", theory: "WHERE filtra le righe che rispettano una condizione. Puoi usare operatori come >, <, =, >=", example: "SELECT * FROM auto WHERE prezzo > 10000;" },
-        validate: (q) => { const n = normalize(q); return n.includes("where stipendio > 2500"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => d.stipendio > 2500), message: "Esatto! Ecco i dipendenti più pagati." })
-      },
-      {
-        id: 4, title: "Filtri Testuali",
-        description: "Abbiamo bisogno di parlare con il DBA. Trova tutti i dati dei dipendenti il cui 'ruolo' è esattamente 'DBA'.",
-        hint: { title: "Stringhe nel DB", theory: "Quando filtri per testo, ricorda di racchiudere il valore tra apici singoli ('valore').", example: "SELECT * FROM auto WHERE colore = 'Rosso';" },
-        validate: (q) => { const n = normalize(q).replace(/"/g, "'"); return n.includes("where ruolo = 'dba'"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => d.ruolo === 'DBA'), message: "Trovato! Luca è il nostro DBA." })
-      },
-      {
-        id: 5, title: "Condizioni Multiple (AND)",
-        description: "Aumentiamo la precisione. Trova i dipendenti del dipartimento 1 (dipartimento_id = 1) CHE HANNO uno stipendio maggiore o uguale a 3000.",
-        hint: { title: "L'operatore AND", theory: "AND richiede che ENTRAMBE le condizioni siano vere.", example: "WHERE colore = 'Rosso' AND prezzo < 5000;" },
-        validate: (q) => { const n = normalize(q); return n.includes("and") && n.includes("dipartimento_id = 1") && n.includes("stipendio >="); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => d.dipartimento_id === 1 && d.stipendio >= 3000), message: "Doppio filtro applicato correttamente!" })
-      }
-    ]
-  },
-  {
-    id: 'macro_2',
-    title: "Filtri Avanzati",
-    description: "Padroneggia gli operatori logici (OR, IN), l'ordinamento (ORDER BY) e la ricerca testuale (LIKE).",
-    icon: <ListFilter size={32} className="text-green-400" />,
-    color: "from-green-900 to-green-950",
-    borderColor: "border-green-500/30",
-    levels: [
-      {
-        id: 6, title: "Condizioni Alternative (OR)",
-        description: "Vogliamo convocare gli sviluppatori. Estrai i dipendenti che hanno ruolo 'Frontend Dev' OPPURE 'Backend Dev'.",
-        hint: { title: "L'operatore OR", theory: "OR richiede che ALMENO UNA delle condizioni sia vera.", example: "WHERE tipo = 'SUV' OR tipo = 'Crossover';" },
-        validate: (q) => { const n = normalize(q).replace(/"/g, "'"); return n.includes("or") && n.includes("'frontend dev'") && n.includes("'backend dev'"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => d.ruolo === 'Frontend Dev' || d.ruolo === 'Backend Dev'), message: "Sviluppatori trovati." })
-      },
-      {
-        id: 7, title: "Ordinamento Dati",
-        description: "Estrai tutti i dipendenti, ma questa volta ordinali per 'stipendio' in ordine decrescente (dal più alto al più basso).",
-        hint: { title: "ORDER BY", theory: "Usa ORDER BY colonna per ordinare. Aggiungi DESC per l'ordine decrescente (ASC è di default).", example: "ORDER BY prezzo DESC;" },
-        validate: (q) => { const n = normalize(q); return n.includes("order by stipendio desc"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: [...db.dipendenti].sort((a,b) => b.stipendio - a.stipendio), message: "Dati ordinati perfettamente!" })
-      },
-      {
-        id: 8, title: "Limitare i Risultati",
-        description: "Chi è il dipendente più pagato in assoluto? Usa l'ordinamento decrescente per stipendio come prima, ma limita il risultato a 1 sola riga.",
-        hint: { title: "LIMIT", theory: "LIMIT n restringe l'output alle prime 'n' righe. Si posiziona alla fine della query.", example: "ORDER BY prezzo DESC LIMIT 1;" },
-        validate: (q) => { const n = normalize(q); return n.includes("order by stipendio desc") && n.includes("limit 1"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: [...db.dipendenti].sort((a,b) => b.stipendio - a.stipendio).slice(0, 1), message: "Hai trovato il dipendente più pagato!" })
-      },
-      {
-        id: 9, title: "Ricerca per Pattern (LIKE)",
-        description: "Ricordi che c'era un dipendente il cui nome iniziava per 'M', ma non ricordi il cognome. Trovalo usando l'operatore LIKE.",
-        hint: { title: "Wildcards %", theory: "LIKE permette ricerche parziali. Il simbolo % rappresenta 'qualsiasi numero di caratteri'.", example: "WHERE nome LIKE 'A%';" },
-        validate: (q) => { const n = normalize(q).replace(/"/g, "'"); return n.includes("like 'm%'"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => d.nome.startsWith('M')), message: "Mario Rossi individuato!" })
-      },
-      {
-        id: 10, title: "Operatore IN",
-        description: "Al posto di usare molti OR, trova i dipendenti che appartengono ai dipartimenti 1 e 2 usando l'operatore IN.",
-        hint: { title: "IN (val1, val2)", theory: "IN verifica se un valore è presente in una lista specificata tra parentesi.", example: "WHERE colore IN ('Rosso', 'Blu');" },
-        validate: (q) => { const n = normalize(q); return n.includes("in") && n.includes("1") && n.includes("2") && n.includes("dipartimento_id"); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: db.dipendenti.filter(d => [1, 2].includes(d.dipartimento_id)), message: "Sintassi elegante e corretta." })
-      }
-    ]
-  },
-  {
-    id: 'macro_3',
-    title: "Struttura (DDL/DML)",
-    description: "Crea tabelle (CREATE), inserisci (INSERT), modifica (UPDATE) ed elimina (DELETE) record.",
-    icon: <TableIcon size={32} className="text-amber-400" />,
-    color: "from-amber-900 to-amber-950",
-    borderColor: "border-amber-500/30",
-    levels: [
-      {
-        id: 11, title: "Definizione Dati (CREATE)",
-        description: "Basta leggere, passiamo all'azione! Crea una nuova tabella 'progetti' con le colonne: 'id' (INT), 'nome' (VARCHAR), 'budget' (INT).",
-        hint: { title: "CREATE TABLE", theory: "Definisce la struttura di una nuova tabella specificando nome e tipo di ogni colonna.", example: "CREATE TABLE auto (id INT, modello VARCHAR);" },
-        validate: (q) => { const n = normalize(q); return n.includes('create table progetti') && n.includes('id') && n.includes('budget'); },
-        onSuccess: (setDb, setOutput) => { setDb(p => ({ ...p, progetti: [] })); setOutput({ type: 'success', message: "Tabella 'progetti' creata!" }); }
-      },
-      {
-        id: 12, title: "Inserimento (INSERT)",
-        description: "La tabella progetti è vuota. Inserisci un record con id: 1, nome: 'Rinnovo Portale', budget: 50000.",
-        hint: { title: "INSERT INTO", theory: "Aggiunge nuove tuple. L'ordine dei VALUES deve corrispondere all'ordine delle colonne.", example: "INSERT INTO auto (id, modello) VALUES (1, 'Punto');" },
-        validate: (q) => { const n = normalize(q).replace(/'/g, ""); return n.includes('insert into progetti') && n.includes('rinnovo portale') && n.includes('50000'); },
-        onSuccess: (setDb, setOutput) => { setDb(p => ({ ...p, progetti: [{ id: 1, nome: 'Rinnovo Portale', budget: 50000 }] })); setOutput({ type: 'success', message: "Progetto inserito!" }); }
-      },
-      {
-        id: 13, title: "Modifica (UPDATE)",
-        description: "Abbiamo ottenuto più fondi! Aggiorna il 'budget' a 60000 per il progetto con id = 1.",
-        hint: { title: "UPDATE", theory: "Aggiorna i dati esistenti. Usa SEMPRE la clausola WHERE, altrimenti modificherai tutte le righe!", example: "UPDATE auto SET prezzo = 12000 WHERE id = 1;" },
-        validate: (q) => { const n = normalize(q); return n.includes('update progetti') && n.includes('set budget = 60000') && n.includes('where id = 1'); },
-        onSuccess: (setDb, setOutput) => { setDb(p => ({ ...p, progetti: [{ id: 1, nome: 'Rinnovo Portale', budget: 60000 }] })); setOutput({ type: 'success', message: "Budget aggiornato!" }); }
-      },
-      {
-        id: 14, title: "Update Matematico",
-        description: "Il nostro Stagista è stato promosso! Fai un UPDATE sulla tabella 'dipendenti' impostando lo stipendio a 1200 DOVE il ruolo è 'Stagista'.",
-        hint: { title: "Operazioni Dinamiche", theory: "Puoi usare espressioni matematiche o assegnazioni dirette nei SET.", example: "UPDATE auto SET prezzo = prezzo + 500 WHERE id = 1;" },
-        validate: (q) => { const n = normalize(q).replace(/"/g, "'"); return n.includes('update dipendenti') && n.includes('set stipendio = 1200') && n.includes("ruolo = 'stagista'"); },
-        onSuccess: (setDb, setOutput) => { 
-          setDb(p => ({ ...p, dipendenti: p.dipendenti.map(d => d.ruolo === 'Stagista' ? {...d, stipendio: 1200} : d) }));
-          setOutput({ type: 'success', message: "Congratulazioni a Paolo per l'aumento!" });
-        }
-      },
-      {
-        id: 15, title: "Eliminazione (DELETE)",
-        description: "Purtroppo il dipendente con id = 5 si è dimesso. Elimina il suo record dalla tabella 'dipendenti'.",
-        hint: { title: "DELETE FROM", theory: "Rimuove intere righe da una tabella. Anche qui, la clausola WHERE è vitale!", example: "DELETE FROM auto WHERE id = 5;" },
-        validate: (q) => { const n = normalize(q); return n.includes('delete from dipendenti') && n.includes('where id = 5'); },
-        onSuccess: (setDb, setOutput) => { 
-          setDb(p => ({ ...p, dipendenti: p.dipendenti.filter(d => d.id !== 5) }));
-          setOutput({ type: 'success', message: "Record rimosso in modo permanente." });
-        }
-      }
-    ]
-  },
-  {
-    id: 'macro_4',
-    title: "Relazioni e JOIN",
-    description: "Modifica tabelle esistenti, usa funzioni di aggregazione (COUNT, SUM) e unisci tabelle con le JOIN.",
-    icon: <Network size={32} className="text-indigo-400" />,
-    color: "from-indigo-900 to-indigo-950",
-    borderColor: "border-indigo-500/30",
-    levels: [
-      {
-        id: 16, title: "Modifica Struttura (ALTER)",
-        description: "Dobbiamo aggiungere una scadenza ai progetti. Aggiungi una colonna 'scadenza' di tipo DATE alla tabella 'progetti'.",
-        hint: { title: "ALTER TABLE", theory: "Permette di modificare la struttura di una tabella già esistente (aggiungere/rimuovere colonne).", example: "ALTER TABLE auto ADD targa VARCHAR;" },
-        validate: (q) => { const n = normalize(q); return n.includes('alter table progetti') && n.includes('add scadenza date'); },
-        onSuccess: (setDb, setOutput) => { 
-          setDb(p => ({ ...p, progetti: p.progetti.map(pr => ({ ...pr, scadenza: null })) }));
-          setOutput({ type: 'success', message: "Colonna aggiunta. I valori esistenti sono impostati a NULL." });
-        }
-      },
-      {
-        id: 17, title: "Funzioni: COUNT",
-        description: "Quanti dipendenti abbiamo attualmente? Usa la funzione COUNT(*) per contare il numero totale di righe in 'dipendenti'.",
-        hint: { title: "Funzioni di Aggregazione", theory: "COUNT restituisce il numero di righe che corrispondono a un criterio.", example: "SELECT COUNT(*) FROM auto;" },
-        validate: (q) => { const n = normalize(q); return n.includes('select count(*)') && n.includes('from dipendenti'); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: [{ 'count(*)': db.dipendenti.length }], message: "Conteggio effettuato!" })
-      },
-      {
-        id: 18, title: "Funzioni: SUM",
-        description: "Qual è il costo totale mensile degli stipendi? Usa la funzione SUM(stipendio) sulla tabella dipendenti.",
-        hint: { title: "Somma", theory: "SUM calcola la somma totale di una colonna numerica.", example: "SELECT SUM(prezzo) FROM auto;" },
-        validate: (q) => { const n = normalize(q); return n.includes('select sum(stipendio)') && n.includes('from dipendenti'); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ type: 'table', data: [{ 'sum(stipendio)': db.dipendenti.reduce((a,b) => a + b.stipendio, 0) }], message: "Somma calcolata con successo!" })
-      },
-      {
-        id: 19, title: "Relazioni (INNER JOIN)",
-        description: "Finalmente le JOIN! Mostra il 'nome' del dipendente e il 'nome_dip' del dipartimento. Usa INNER JOIN tra dipendenti e dipartimenti collegandoli tramite dipartimento_id = id.",
-        hint: { title: "Unire i Dati", theory: "La JOIN unisce due tabelle affiancando le righe che hanno una chiave in comune.", example: "SELECT a.modello, b.nome FROM auto a INNER JOIN marca b ON a.marca_id = b.id;" },
-        validate: (q) => { const n = normalize(q); return n.includes('join dipartimenti') && (n.includes('on dipendenti.dipartimento_id = dipartimenti.id') || n.includes('where dipendenti.dipartimento_id = dipartimenti.id')); },
-        onSuccess: (setDb, setOutput, db) => setOutput({ 
-          type: 'table', 
-          data: db.dipendenti.map(dip => ({ nome: dip.nome, nome_dip: db.dipartimenti.find(d => d.id === dip.dipartimento_id)?.nome_dip || 'N/A' })),
-          message: "JOIN riuscita! Hai combinato dati da due tabelle." 
-        })
-      },
-      {
-        id: 20, title: "Il Livello del Boss",
-        description: "L'esame finale! Mostra il 'nome' del dipendente e la 'sede' del dipartimento tramite una JOIN. Filtra (WHERE) solo chi ha uno stipendio > 2500 e ordina (ORDER BY) il risultato alfabeticamente per sede (ASC).",
-        hint: { title: "Tutto Insieme", theory: "L'ordine delle clausole SQL è rigoroso: SELECT -> FROM -> JOIN -> ON -> WHERE -> ORDER BY.", example: "Credi in te stesso!" },
-        validate: (q) => { const n = normalize(q); return n.includes('join dipartimenti') && n.includes('where') && n.includes('stipendio > 2500') && n.includes('order by'); },
-        onSuccess: (setDb, setOutput, db) => {
-          const result = db.dipendenti
-            .filter(d => d.stipendio > 2500)
-            .map(dip => ({ nome: dip.nome, sede: db.dipartimenti.find(d => d.id === dip.dipartimento_id).sede }))
-            .sort((a,b) => a.sede.localeCompare(b.sede));
-          setOutput({ type: 'table', data: result, message: "🎉 INCREDIBILE! Hai superato l'esame finale di SQL!" });
-        }
-      }
-    ]
-  }
-];
+const shuffleArray = (items) => [...items].sort(() => Math.random() - 0.5);
 
-// --- STATO INIZIALE DEL DATABASE ---
-const INITIAL_DB = {
-  dipartimenti: [
-    { id: 1, nome_dip: 'IT & Sviluppo', sede: 'Milano' },
-    { id: 2, nome_dip: 'Risorse Umane', sede: 'Roma' }
-  ],
-  dipendenti: [
-    { id: 1, nome: 'Mario Rossi', ruolo: 'Backend Dev', stipendio: 3200, dipartimento_id: 1 },
-    { id: 2, nome: 'Giulia Bianchi', ruolo: 'Frontend Dev', stipendio: 2800, dipartimento_id: 1 },
-    { id: 3, nome: 'Luca Verdi', ruolo: 'DBA', stipendio: 3500, dipartimento_id: 1 },
-    { id: 4, nome: 'Anna Neri', ruolo: 'Recruiter', stipendio: 2100, dipartimento_id: 2 },
-    { id: 5, nome: 'Paolo Gialli', ruolo: 'Stagista', stipendio: 800, dipartimento_id: 1 }
-  ]
-};
-
-// Funzione helper per preparare il DB in base al modulo selezionato (così i salti in avanti funzionano)
-const getDbForMacro = (macroIndex) => {
-  const db = JSON.parse(JSON.stringify(INITIAL_DB)); 
-  if (macroIndex >= 3) { // Se si salta al modulo 4, applica le modifiche DML/DDL del modulo 3
-    const stagista = db.dipendenti.find(d => d.ruolo === 'Stagista');
-    if (stagista) stagista.stipendio = 1200;
-    db.dipendenti = db.dipendenti.filter(d => d.id !== 5);
-    db.progetti = [{ id: 1, nome: 'Rinnovo Portale', budget: 60000 }];
-  }
-  return db;
+const prepareLevelsForRun = (macro) => {
+  if (macro.type !== 'quiz') return macro.levels;
+  return shuffleArray(macro.levels).map(level => ({
+    ...level,
+    options: shuffleArray(level.options)
+  }));
 };
 
 // --- COMPONENTE GRAFICO E-R ---
@@ -435,10 +223,12 @@ export default function App() {
   // --- STATI MENU E NAVIGAZIONE ---
   const [activeMacroIndex, setActiveMacroIndex] = useState(null); // null = Menu Principale
   const [currentSubLevelIndex, setCurrentSubLevelIndex] = useState(0);
+  const [activeLevels, setActiveLevels] = useState([]);
 
   // --- STATI GIOCO ---
   const [db, setDb] = useState(INITIAL_DB);
   const [query, setQuery] = useState('');
+  const [selectedAnswer, setSelectedAnswer] = useState('');
   const [output, setOutput] = useState(null);
   const [showHint, setShowHint] = useState(false);
   const [showBriefing, setShowBriefing] = useState(false);
@@ -457,16 +247,31 @@ export default function App() {
 
   // Recupera l'oggetto livello attivo in base al modulo selezionato
   const activeMacro = activeMacroIndex !== null ? MACRO_LEVELS[activeMacroIndex] : null;
-  const level = activeMacro ? activeMacro.levels[currentSubLevelIndex] : null;
+  const level = activeLevels[currentSubLevelIndex] || null;
+  const isQuizModule = activeMacro?.type === 'quiz';
+
+  const resetLevelState = () => {
+    setQuery('');
+    setSelectedAnswer('');
+    setOutput(null);
+    setShowHint(false);
+    setAiFeedback(null);
+    setLevelAttempts(0);
+    setUsedAI(false);
+  };
 
   // Funzione per avviare un Modulo
   const startMacroLevel = (index) => {
+    const macro = MACRO_LEVELS[index];
     setActiveMacroIndex(index);
     setCurrentSubLevelIndex(0);
+    setActiveLevels(prepareLevelsForRun(macro));
     setCurrentScore(0);
     setLevelStats([]);
-    setDb(getDbForMacro(index)); // Setup del DB intelligente
+    setDb(macro.type === 'query' ? getDbForMacro(index) : INITIAL_DB); // Setup del DB intelligente
     setIsMacroFinished(false);
+    resetLevelState();
+    setAnimStep(0);
     setShowBriefing(true);
   };
 
@@ -478,27 +283,28 @@ export default function App() {
 
   useEffect(() => {
     if (showBriefing && level) {
-      setAnimStep(0);
       const t1 = setTimeout(() => setAnimStep(1), 100);
       const t2 = setTimeout(() => setAnimStep(2), 800);
       const t3 = setTimeout(() => setAnimStep(3), 1500);
       const t4 = setTimeout(() => setAnimStep(4), 2200);
       return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
     }
-  }, [showBriefing, currentSubLevelIndex]);
+  }, [showBriefing, currentSubLevelIndex, level]);
 
-  useEffect(() => {
-    setQuery('');
-    setOutput(null);
-    setShowHint(false);
-    setAiFeedback(null);
-    setLevelAttempts(0);
-    setUsedAI(false);
-  }, [currentSubLevelIndex, activeMacroIndex]);
+  const awardLevelScore = (currentAttempt) => {
+    let pointsEarned = 100 - ((currentAttempt - 1) * 10);
+    if (usedAI) pointsEarned -= 30;
+    if (pointsEarned < 20) pointsEarned = 20;
 
-  useEffect(() => {
-    if (aiFeedback && !isAiLoading) setAiFeedback(null);
-  }, [query]);
+    let starsEarned = 1;
+    if (currentAttempt === 1 && !usedAI) starsEarned = 3;
+    else if (currentAttempt <= 3 && !usedAI) starsEarned = 2;
+
+    setCurrentScore(prev => prev + pointsEarned);
+    setLevelStats(prev => [...prev, { level: level.id, points: pointsEarned, stars: starsEarned, attempts: currentAttempt, usedAI }]);
+
+    return { pointsEarned, starsEarned };
+  };
 
   const handleRunQuery = () => {
     if (!query.trim()) { setOutput({ type: 'error', message: "La query è vuota. Scrivi un comando SQL." }); return; }
@@ -508,16 +314,7 @@ export default function App() {
     const currentAttempt = levelAttempts + 1;
 
     if (isValid) {
-      let pointsEarned = 100 - ((currentAttempt - 1) * 10);
-      if (usedAI) pointsEarned -= 30;
-      if (pointsEarned < 20) pointsEarned = 20;
-
-      let starsEarned = 1;
-      if (currentAttempt === 1 && !usedAI) starsEarned = 3;
-      else if (currentAttempt <= 3 && !usedAI) starsEarned = 2;
-
-      setCurrentScore(prev => prev + pointsEarned);
-      setLevelStats(prev => [...prev, { level: level.id, points: pointsEarned, stars: starsEarned, attempts: currentAttempt, usedAI }]);
+      const { pointsEarned, starsEarned } = awardLevelScore(currentAttempt);
 
       level.onSuccess(setDb, setOutput, db);
       setAiFeedback(null);
@@ -528,15 +325,36 @@ export default function App() {
     }
   };
 
+  const handleSubmitQuiz = () => {
+    if (!selectedAnswer) { setOutput({ type: 'error', message: "Seleziona una risposta prima di confermare." }); return; }
+    if (output?.type === 'success' || output?.type === 'table') return;
+
+    const currentAttempt = levelAttempts + 1;
+
+    if (selectedAnswer === level.correctAnswer) {
+      const { pointsEarned, starsEarned } = awardLevelScore(currentAttempt);
+      setAiFeedback(null);
+      setOutput({
+        type: 'success',
+        message: `Risposta corretta! ${level.answer} (+${pointsEarned} pt, ${starsEarned} Stelle)`
+      });
+    } else {
+      setLevelAttempts(currentAttempt);
+      setOutput({ type: 'error', message: "Risposta non corretta. Rileggi l'introduzione e riprova, oppure chiedi un indizio al Tutor AI." });
+    }
+  };
+
   const handleAskAI = async () => {
     setIsAiLoading(true); setAiFeedback(null); setUsedAI(true);
     const dbSchema = Object.keys(db).join(', ');
-    const hint = await generateAIHint(level.description, query, dbSchema);
+    const hint = await generateAIHint(level.description, isQuizModule ? selectedAnswer : query, dbSchema, level.type);
     setAiFeedback(hint); setIsAiLoading(false);
   };
 
   const handleNextLevel = () => {
-    if (currentSubLevelIndex < activeMacro.levels.length - 1) {
+    if (currentSubLevelIndex < activeLevels.length - 1) {
+      resetLevelState();
+      setAnimStep(0);
       setCurrentSubLevelIndex(prev => prev + 1);
       setShowBriefing(true);
     } else {
@@ -546,10 +364,10 @@ export default function App() {
 
   const copyToClipboard = () => {
     const totalStars = levelStats.reduce((acc, curr) => acc + curr.stars, 0);
-    const maxScore = activeMacro.levels.length * 100;
+    const maxScore = activeLevels.length * 100;
     const finalGrade = Math.max(2, Math.min(10, (currentScore / maxScore) * 10)).toFixed(1);
-    
-    const text = `🎮 SQL Quest - Risultati Modulo: ${activeMacro.title}\nPunteggio: ${currentScore}/${maxScore}\nStelle: ${totalStars}/${activeMacro.levels.length * 3}\nVOTO MODULO: ${finalGrade}/10`;
+    const resultLabel = isQuizModule ? 'Quiz Teoria' : 'Modulo';
+    const text = `🎮 SQL Quest - Risultati ${resultLabel}: ${activeMacro.title}\nPunteggio: ${currentScore}/${maxScore}\nStelle: ${totalStars}/${activeLevels.length * 3}\nVOTO ${resultLabel.toUpperCase()}: ${finalGrade}/10`;
     
     const textArea = document.createElement("textarea"); textArea.value = text; document.body.appendChild(textArea); textArea.select();
     try { document.execCommand('copy'); alert("Risultati copiati! Incollali e inviali al professore."); } catch (err) { console.error('Impossibile copiare', err); }
@@ -618,11 +436,11 @@ export default function App() {
               <Database className="text-white sm:w-9 sm:h-9" size={32} />
             </div>
             <h1 className="text-3xl sm:text-4xl font-black text-white mb-3 tracking-tight">SQL Quest</h1>
-            <p className="text-xs sm:text-sm md:text-base text-slate-400 max-w-2xl mx-auto">Scegli un modulo didattico e metti alla prova le tue abilità. Ogni modulo contiene 5 query progressive da completare.</p>
+            <p className="text-xs sm:text-sm md:text-base text-slate-400 max-w-2xl mx-auto">Scegli un modulo didattico e metti alla prova le tue abilità con query SQL o quiz teorici. Ogni modulo contiene 5 livelli progressivi.</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {MACRO_LEVELS.map((macro, idx) => (
+            {SQL_MODULES.map((macro, idx) => (
               <button
                 key={macro.id}
                 onClick={() => startMacroLevel(idx)}
@@ -633,17 +451,52 @@ export default function App() {
                     {macro.icon}
                   </div>
                   <div className="bg-slate-900/80 px-2 sm:px-3 py-1 rounded-full border border-slate-700 flex items-center gap-1.5 text-[10px] sm:text-xs font-bold text-slate-400">
-                    <LayoutGrid size={12} className="sm:w-[14px] sm:h-[14px]" /> 5 Livelli
+                    <LayoutGrid size={12} className="sm:w-[14px] sm:h-[14px]" /> 5 {macro.type === 'quiz' ? 'Quiz' : 'Livelli'}
                   </div>
                 </div>
                 <h3 className="text-lg sm:text-xl font-bold text-white mb-1.5 sm:mb-2 group-hover:text-blue-400 transition-colors">{macro.title}</h3>
                 <p className="text-slate-400 text-[11px] sm:text-sm leading-relaxed flex-1 mb-3 sm:mb-4">{macro.description}</p>
                 <div className="flex items-center text-blue-400 text-xs sm:text-sm font-bold gap-2 mt-auto">
                   <PlayCircle size={16} className="sm:w-[18px] sm:h-[18px] group-hover:translate-x-1 transition-transform" />
-                  Inizia Modulo
+                  {macro.type === 'quiz' ? 'Inizia Quiz' : 'Inizia Modulo'}
                 </div>
               </button>
             ))}
+          </div>
+
+          <div className="my-7 sm:my-9 flex items-center gap-3 sm:gap-4" aria-hidden="true">
+            <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700 to-slate-700"></div>
+            <div className="rounded-full border border-cyan-500/30 bg-cyan-950/30 px-3 sm:px-4 py-1 text-[10px] sm:text-xs font-black uppercase tracking-[0.24em] text-cyan-200 shadow-[0_0_20px_rgba(34,211,238,0.08)]">Quiz Teoria</div>
+            <div className="h-px flex-1 bg-gradient-to-r from-slate-700 via-slate-700 to-transparent"></div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {THEORY_MODULES.map((macro, theoryIdx) => {
+              const idx = SQL_MODULES.length + theoryIdx;
+
+              return (
+                <button
+                  key={macro.id}
+                  onClick={() => startMacroLevel(idx)}
+                  className={`group relative bg-slate-800/80 backdrop-blur-sm border ${macro.borderColor} p-4 sm:p-5 rounded-2xl text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl hover:bg-slate-800 flex flex-col`}
+                >
+                  <div className="flex justify-between items-start mb-3">
+                    <div className={`p-2 sm:p-2.5 rounded-xl bg-slate-900/80 border ${macro.borderColor} [&>svg]:w-5 [&>svg]:h-5 sm:[&>svg]:w-6 sm:[&>svg]:h-6`}>
+                      {macro.icon}
+                    </div>
+                    <div className="bg-slate-900/80 px-2 sm:px-3 py-1 rounded-full border border-slate-700 flex items-center gap-1.5 text-[10px] sm:text-xs font-bold text-slate-400">
+                      <LayoutGrid size={12} className="sm:w-[14px] sm:h-[14px]" /> 5 Quiz
+                    </div>
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-bold text-white mb-1.5 sm:mb-2 group-hover:text-cyan-300 transition-colors">{macro.title}</h3>
+                  <p className="text-slate-400 text-[11px] sm:text-sm leading-relaxed flex-1 mb-3 sm:mb-4">{macro.description}</p>
+                  <div className="flex items-center text-cyan-300 text-xs sm:text-sm font-bold gap-2 mt-auto">
+                    <PlayCircle size={16} className="sm:w-[18px] sm:h-[18px] group-hover:translate-x-1 transition-transform" />
+                    Inizia Quiz
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -678,7 +531,7 @@ export default function App() {
           
           {/* PROGRESS DOTS ADATTIVI */}
           <div className="flex gap-1 sm:gap-1.5">
-            {activeMacro.levels.map((_, idx) => (
+            {activeLevels.map((_, idx) => (
               <div key={idx} className={`h-1.5 w-1.5 sm:w-3 md:w-6 rounded-full transition-colors ${idx < currentSubLevelIndex ? 'bg-green-500' : idx === currentSubLevelIndex ? 'bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)]' : 'bg-slate-800'}`} />
             ))}
           </div>
@@ -694,10 +547,10 @@ export default function App() {
               <button onClick={() => setShowRules(false)} className="text-slate-400 hover:text-white transition-colors"><XCircle size={20} className="sm:w-6 sm:h-6" /></button>
             </div>
             <div className="p-4 sm:p-6 space-y-4 sm:space-y-5">
-              <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">Il tuo Voto Finale dipende da quanti punti e stelle accumuli. Cerca di risolvere le query con meno tentativi possibili!</p>
+              <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">Il tuo Voto Finale dipende da quanti punti e stelle accumuli. Cerca di risolvere i livelli con meno tentativi possibili!</p>
               <ul className="space-y-2 sm:space-y-3 text-xs sm:text-sm text-slate-300 font-medium">
                 <li className="flex items-center gap-2 sm:gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-700/50"><div className="w-6 h-6 sm:w-8 sm:h-8 rounded bg-green-500/20 text-green-400 flex items-center justify-center font-bold text-xs sm:text-sm">+100</div><span>Punti base per ogni livello.</span></li>
-                <li className="flex items-center gap-2 sm:gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-700/50"><div className="w-6 h-6 sm:w-8 sm:h-8 rounded bg-red-500/20 text-red-400 flex items-center justify-center font-bold text-xs sm:text-sm">-10</div><span>Penalità per query errata.</span></li>
+                <li className="flex items-center gap-2 sm:gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-700/50"><div className="w-6 h-6 sm:w-8 sm:h-8 rounded bg-red-500/20 text-red-400 flex items-center justify-center font-bold text-xs sm:text-sm">-10</div><span>Penalità per risposta errata.</span></li>
                 <li className="flex items-center gap-2 sm:gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-700/50"><div className="w-6 h-6 sm:w-8 sm:h-8 rounded bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-xs sm:text-sm">-30</div><span>Penalità se usi Tutor AI.</span></li>
               </ul>
               <div className="pt-3 sm:pt-4 border-t border-slate-700/80">
@@ -721,27 +574,27 @@ export default function App() {
             <div className="bg-amber-500/20 p-3 sm:p-4 rounded-full inline-block mb-3 sm:mb-4 border border-amber-500/30">
               <Award className="text-amber-400 w-10 h-10 sm:w-12 sm:h-12" />
             </div>
-            <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white mb-1.5 sm:mb-2 tracking-tight">Modulo Superato!</h2>
-            <p className="text-slate-400 mb-5 sm:mb-6 text-xs sm:text-sm md:text-base">Hai completato il modulo <strong className="text-white">{activeMacro.title}</strong>.</p>
+            <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white mb-1.5 sm:mb-2 tracking-tight">{isQuizModule ? 'Quiz Superato!' : 'Modulo Superato!'}</h2>
+            <p className="text-slate-400 mb-5 sm:mb-6 text-xs sm:text-sm md:text-base">Hai completato {isQuizModule ? 'il quiz' : 'il modulo'} <strong className="text-white">{activeMacro.title}</strong>.</p>
             <div className="grid grid-cols-2 gap-3 sm:gap-4 w-full mb-5 sm:mb-6">
               <div className="bg-slate-900/80 border border-slate-700 rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center shadow-inner">
                 <span className="text-slate-400 font-mono text-[10px] sm:text-xs uppercase mb-1">Punteggio</span>
                 <div className="flex items-center gap-1.5 sm:gap-2"><Trophy className="text-amber-400 w-4 h-4 sm:w-5 sm:h-5" /><span className="text-2xl sm:text-3xl font-black text-white">{currentScore}</span></div>
-                <span className="text-slate-500 text-[9px] sm:text-[10px] mt-1">su {activeMacro.levels.length * 100} max</span>
+                <span className="text-slate-500 text-[9px] sm:text-[10px] mt-1">su {activeLevels.length * 100} max</span>
               </div>
               <div className="bg-slate-900/80 border border-slate-700 rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center shadow-inner">
                 <span className="text-slate-400 font-mono text-[10px] sm:text-xs uppercase mb-1">Stelle Totali</span>
                 <div className="flex items-center gap-1.5 sm:gap-2"><Star className="text-yellow-400 fill-yellow-400 w-4 h-4 sm:w-5 sm:h-5" /><span className="text-2xl sm:text-3xl font-black text-white">{levelStats.reduce((acc, curr) => acc + curr.stars, 0)}</span></div>
-                <span className="text-slate-500 text-[9px] sm:text-[10px] mt-1">su {activeMacro.levels.length * 3} max</span>
+                <span className="text-slate-500 text-[9px] sm:text-[10px] mt-1">su {activeLevels.length * 3} max</span>
               </div>
             </div>
             <div className="w-full bg-gradient-to-r from-blue-600/20 to-indigo-600/20 border border-blue-500/30 rounded-xl p-3 sm:p-4 mb-5 sm:mb-6 flex items-center justify-between">
               <div className="text-left">
-                <span className="text-blue-300 font-bold uppercase tracking-wider text-[11px] sm:text-xs">Voto del Modulo</span>
+                <span className="text-blue-300 font-bold uppercase tracking-wider text-[11px] sm:text-xs">Voto {isQuizModule ? 'del Quiz' : 'del Modulo'}</span>
                 <p className="text-slate-300 text-[10px] sm:text-xs mt-0.5">Valutazione basata su questa unità.</p>
               </div>
               <div className="bg-black/50 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg border border-blue-500/50">
-                <span className="text-xl sm:text-2xl font-black text-blue-400">{Math.max(2, Math.min(10, (currentScore / (activeMacro.levels.length * 100)) * 10)).toFixed(1)}<span className="text-xs sm:text-sm text-slate-500">/10</span></span>
+                <span className="text-xl sm:text-2xl font-black text-blue-400">{Math.max(2, Math.min(10, (currentScore / (activeLevels.length * 100)) * 10)).toFixed(1)}<span className="text-xs sm:text-sm text-slate-500">/10</span></span>
               </div>
             </div>
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full">
@@ -754,6 +607,53 @@ export default function App() {
             </div>
           </div>
         </div>
+      ) : showBriefing && isQuizModule ? (
+        <main className="relative flex-1 overflow-y-auto bg-[#f4efe7] text-slate-950">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_20%,rgba(14,165,233,0.18),transparent_28%),radial-gradient(circle_at_85%_10%,rgba(20,184,166,0.18),transparent_26%),linear-gradient(135deg,rgba(15,23,42,0.05)_0,transparent_42%)]"></div>
+          <div className="relative mx-auto flex min-h-full w-full max-w-5xl flex-col justify-center px-4 py-5 sm:px-7 sm:py-7">
+            <div className="mb-4 flex items-center justify-between gap-3 sm:mb-5">
+              <div className="min-w-0">
+                <div className="text-[10px] font-black uppercase tracking-[0.28em] text-teal-700">Prima della domanda</div>
+                <h2 className="mt-1 truncate text-lg font-black text-slate-950 sm:text-2xl">{activeMacro.title}</h2>
+              </div>
+              <div className="flex shrink-0 items-center gap-2 rounded-full border border-slate-300 bg-white/70 px-3 py-1.5 shadow-sm backdrop-blur">
+                <BookOpen className="h-4 w-4 text-teal-700" />
+                <span className="text-xs font-black tabular-nums sm:text-sm">{currentSubLevelIndex + 1}/{activeLevels.length}</span>
+              </div>
+            </div>
+
+            <div className="mb-5 flex items-center gap-2 sm:mb-6">
+              {activeLevels.map((item, idx) => (
+                <div key={item.id} className={`h-2 flex-1 rounded-full transition-colors ${idx < currentSubLevelIndex ? 'bg-teal-600' : idx === currentSubLevelIndex ? 'bg-slate-950' : 'bg-slate-300'}`}></div>
+              ))}
+            </div>
+
+            <section className="rounded-[2rem] border border-slate-200 bg-white/85 p-5 shadow-[0_30px_80px_rgba(15,23,42,0.12)] backdrop-blur sm:p-7 lg:p-8">
+              <div className={`transition-[opacity,transform] duration-700 transform ${animStep >= 1 ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'}`}>
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-slate-950 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-white">Argomento</span>
+                  <span className="rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-teal-800">{level.hint.title}</span>
+                </div>
+                <h1 className="text-3xl font-black leading-[1.05] tracking-tight text-slate-950 sm:text-5xl">{level.title}</h1>
+              </div>
+
+              <div className={`mt-5 max-h-[45vh] overflow-y-auto rounded-2xl border border-slate-200 bg-[#fffaf2] p-4 transition-[opacity,transform] duration-700 transform sm:max-h-[42vh] sm:p-5 ${animStep >= 2 ? 'opacity-100 scale-100' : 'opacity-0 scale-95'}`}>
+                <p className="whitespace-pre-line text-sm font-semibold leading-relaxed text-slate-800 sm:text-base lg:text-[17px]">{level.hint.theory}</p>
+              </div>
+
+              <div className={`mt-4 rounded-2xl border border-slate-900 bg-slate-950 p-4 text-white transition-[opacity,transform] duration-700 transform sm:p-5 ${animStep >= 3 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
+                <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.22em] text-teal-300"><Sparkles className="h-4 w-4" />Formato</div>
+                <p className="text-sm font-semibold leading-relaxed text-slate-200">{level.hint.example} La prossima schermata mostra una domanda in stile quiz. Ogni conferma sbagliata conta come tentativo.</p>
+              </div>
+
+              <div className={`mt-5 flex justify-end transition-[opacity,transform] duration-700 transform ${animStep >= 4 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
+                <button onClick={() => setShowBriefing(false)} className="group inline-flex items-center justify-center gap-2 rounded-full bg-teal-600 px-6 py-3 text-sm font-black text-white shadow-[0_14px_30px_rgba(13,148,136,0.28)] transition-all hover:bg-teal-500 active:scale-95 sm:text-base">
+                  Vai alla domanda <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
       ) : showBriefing ? (
         <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6 bg-slate-900 relative overflow-y-auto overflow-x-hidden">
           <div className="absolute top-1/4 left-1/4 w-40 sm:w-64 h-40 sm:h-64 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
@@ -773,11 +673,105 @@ export default function App() {
             </div>
             <div className={`transition-all duration-700 transform ${animStep >= 4 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
               <button onClick={() => setShowBriefing(false)} className="group flex items-center gap-2 sm:gap-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-6 sm:px-8 py-3 sm:py-4 rounded-full font-bold text-base sm:text-lg transition-all shadow-[0_0_20px_rgba(59,130,246,0.4)] hover:shadow-[0_0_30px_rgba(59,130,246,0.6)] hover:scale-105 active:scale-95">
-                <Terminal className="group-hover:animate-pulse w-5 h-5 sm:w-6 sm:h-6" /> Entra nel Terminale <ArrowRight className="group-hover:translate-x-2 transition-transform w-5 h-5 sm:w-6 sm:h-6" />
+                <Terminal className="group-hover:animate-pulse w-5 h-5 sm:w-6 sm:h-6" /> {isQuizModule ? 'Vai alla Domanda' : 'Entra nel Terminale'} <ArrowRight className="group-hover:translate-x-2 transition-transform w-5 h-5 sm:w-6 sm:h-6" />
               </button>
             </div>
           </div>
         </div>
+      ) : isQuizModule ? (
+        <main className="relative flex-1 overflow-y-auto bg-[#f4efe7] text-slate-950">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_20%,rgba(14,165,233,0.18),transparent_28%),radial-gradient(circle_at_85%_10%,rgba(20,184,166,0.18),transparent_26%),linear-gradient(135deg,rgba(15,23,42,0.05)_0,transparent_42%)]"></div>
+          <div className="relative mx-auto flex min-h-full w-full max-w-5xl flex-col px-3 py-3 sm:px-5 sm:py-4 lg:px-6">
+            <div className="mb-3 flex items-center justify-between gap-3 sm:mb-4">
+              <div className="min-w-0">
+                <div className="text-[10px] font-black uppercase tracking-[0.28em] text-teal-700">Quiz teoria</div>
+                <h2 className="mt-0.5 truncate text-base font-black text-slate-950 sm:text-xl">{activeMacro.title}</h2>
+              </div>
+              <div className="flex shrink-0 items-center gap-2 rounded-full border border-slate-300 bg-white/70 px-2.5 py-1 shadow-sm backdrop-blur sm:px-3 sm:py-1.5">
+                <Trophy className="h-4 w-4 text-amber-600" />
+                <span className="text-xs font-black tabular-nums sm:text-sm">{currentScore} pt</span>
+              </div>
+            </div>
+
+            <div className="mb-4 flex items-center gap-1.5 sm:mb-5 sm:gap-2">
+              {activeLevels.map((item, idx) => (
+                <div key={item.id} className={`h-1.5 flex-1 rounded-full transition-colors sm:h-2 ${idx < currentSubLevelIndex ? 'bg-teal-600' : idx === currentSubLevelIndex ? 'bg-slate-950' : 'bg-slate-300'}`}></div>
+              ))}
+            </div>
+
+            <section className="grid flex-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_250px] lg:gap-5">
+              <div className="rounded-[1.5rem] border border-slate-200 bg-white/80 p-4 shadow-[0_24px_60px_rgba(15,23,42,0.11)] backdrop-blur sm:p-5 lg:p-6">
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-slate-950 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-white">Domanda {currentSubLevelIndex + 1}/{activeLevels.length}</span>
+                  <span className="rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-teal-800">{level.kind === 'boolean' ? 'Vero/Falso' : 'Scelta multipla'}</span>
+                </div>
+
+                <p className="mb-2 text-xs font-black uppercase tracking-[0.22em] text-slate-400 sm:text-sm">{level.hint.title}</p>
+                <h1 className="mb-4 text-2xl font-black leading-[1.06] tracking-tight text-slate-950 sm:text-3xl lg:text-4xl">{level.question}</h1>
+
+                <div className="space-y-2 sm:space-y-2.5">
+                  {level.options.map((option, optionIdx) => {
+                    const letter = String.fromCharCode(65 + optionIdx);
+
+                    return (
+                      <button
+                        key={option}
+                        onClick={() => { setSelectedAnswer(option); if (aiFeedback && !isAiLoading) setAiFeedback(null); }}
+                        className={`group flex w-full items-start gap-3 rounded-2xl border-2 p-3 text-left transition-[background-color,border-color,box-shadow,transform,color] sm:p-3.5 ${selectedAnswer === option ? 'translate-x-1 border-slate-950 bg-slate-950 text-white shadow-[7px_7px_0_rgba(13,148,136,0.32)]' : 'border-slate-200 bg-[#fffaf2] text-slate-800 hover:-translate-y-0.5 hover:border-slate-950 hover:shadow-[5px_5px_0_rgba(15,23,42,0.12)]'}`}
+                      >
+                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-black sm:h-8 sm:w-8 sm:text-sm ${selectedAnswer === option ? 'border-white/30 bg-white text-slate-950' : 'border-slate-300 bg-white text-slate-950 group-hover:border-slate-950'}`}>{letter}</span>
+                        <span className="pt-0.5 text-sm font-bold leading-snug sm:text-base">{option}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <button onClick={handleSubmitQuiz} className="inline-flex items-center justify-center gap-2 rounded-full bg-teal-600 px-5 py-2.5 text-sm font-black text-white shadow-[0_12px_24px_rgba(13,148,136,0.24)] transition-all hover:bg-teal-500 active:scale-95 sm:text-base">
+                    Conferma <ArrowRight className="h-4 w-4" />
+                  </button>
+                  {(output?.type === 'success' || output?.type === 'table') && (
+                    <button onClick={handleNextLevel} className="inline-flex items-center justify-center gap-2 rounded-full bg-slate-950 px-5 py-2.5 text-sm font-black text-white transition-all hover:bg-slate-800 active:scale-95 sm:text-base">
+                      {currentSubLevelIndex < activeLevels.length - 1 ? 'Prossima domanda' : 'Completa quiz'} <ChevronRight className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-3 min-h-10">
+                  {!output && <p className="text-xs font-medium text-slate-500 sm:text-sm">Scegli una risposta e conferma quando sei sicuro.</p>}
+                  {output?.type === 'error' && (
+                    <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-red-900 sm:p-4">
+                      <div className="flex items-start gap-2 text-sm font-bold"><XCircle className="mt-0.5 h-4 w-4 shrink-0" />{output.message}</div>
+                      {!aiFeedback && !isAiLoading && (
+                        <button onClick={handleAskAI} className="mt-3 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 transition-colors hover:bg-indigo-50"><Sparkles className="h-3.5 w-3.5" />Chiedi un indizio al Tutor AI</button>
+                      )}
+                    </div>
+                  )}
+                  {isAiLoading && <div className="mt-2 flex items-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 p-3 text-sm font-bold text-indigo-800"><Loader2 className="h-4 w-4 animate-spin" />Il Tutor AI sta analizzando la tua risposta...</div>}
+                  {aiFeedback && (
+                    <div className="mt-2 rounded-2xl border border-indigo-200 bg-indigo-50 p-3 text-sm font-semibold leading-relaxed text-indigo-950"><Bot className="mr-2 inline h-4 w-4 text-indigo-600" />{aiFeedback}</div>
+                  )}
+                  {output?.type === 'success' && (
+                    <div className="rounded-2xl border border-teal-200 bg-teal-50 p-3 text-teal-950 sm:p-4">
+                      <div className="flex items-start gap-2 text-sm font-bold leading-relaxed"><CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-teal-700" />{output.message}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <aside className="space-y-3 lg:sticky lg:top-4">
+                <div className="rounded-[1.25rem] border border-slate-200 bg-white/70 p-4 shadow-sm backdrop-blur">
+                  <div className="mb-2 text-[10px] font-black uppercase tracking-[0.24em] text-teal-700">Prima di rispondere</div>
+                <p className="text-xs font-semibold leading-relaxed text-slate-700 sm:text-sm">{level.hint.brief || level.hint.theory}</p>
+                </div>
+                <div className="rounded-[1.25rem] border border-slate-200 bg-slate-950 p-4 text-white shadow-sm">
+                  <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-slate-400"><Star className="h-4 w-4 text-amber-400" />Punteggio</div>
+                  <p className="text-xs leading-relaxed text-slate-300 sm:text-sm">Errore: -10. Tutor AI: -30. Minimo per domanda: 20 punti.</p>
+                </div>
+              </aside>
+            </section>
+          </div>
+        </main>
       ) : (
         // OVERFLOW-Y-AUTO su main per permettere lo scorrimento dei blocchi impilati su Mobile
         <main className="flex-1 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
@@ -787,7 +781,7 @@ export default function App() {
             <div className="p-3 sm:p-4 bg-slate-900/50 flex-none border-b border-slate-800">
               <div className="flex justify-between items-start mb-1.5 sm:mb-2">
                 <div>
-                  <span className="text-blue-400 font-mono text-[10px] sm:text-xs font-bold uppercase tracking-wider">Query {currentSubLevelIndex + 1} di 5</span>
+                  <span className="text-blue-400 font-mono text-[10px] sm:text-xs font-bold uppercase tracking-wider">{isQuizModule ? 'Domanda' : 'Query'} {currentSubLevelIndex + 1} di {activeLevels.length}</span>
                   <h2 className="text-lg sm:text-xl font-bold text-white mt-0.5">{level.title}</h2>
                 </div>
                 <button onClick={() => setShowHint(!showHint)} className="flex items-center gap-1 sm:gap-2 text-[10px] sm:text-xs text-slate-300 bg-slate-800 hover:bg-slate-700 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-md transition-colors border border-slate-700"><HelpCircle size={12} className={`sm:w-[14px] sm:h-[14px] ${showHint ? "text-amber-400" : ""}`} />{showHint ? 'Chiudi Aiuto' : 'Aiuto'}</button>
@@ -804,16 +798,29 @@ export default function App() {
             <div className="flex-1 flex flex-col p-3 sm:p-4 pt-2 sm:pt-3 min-h-[150px] lg:min-h-0">
               <div className="flex-1 bg-slate-900 rounded-lg border border-slate-700 flex flex-col overflow-hidden shadow-inner min-h-[100px] lg:min-h-0">
                 <div className="bg-slate-800 px-2 sm:px-3 py-1 sm:py-1.5 border-b border-slate-700 flex justify-between items-center flex-none">
-                  <span className="text-[9px] sm:text-[10px] font-mono text-slate-400 uppercase">query.sql</span><span className="text-[9px] sm:text-[10px] font-mono text-blue-400">PostgreSQL/MySQL</span>
+                  <span className="text-[9px] sm:text-[10px] font-mono text-slate-400 uppercase">{isQuizModule ? 'quiz.teoria' : 'query.sql'}</span><span className="text-[9px] sm:text-[10px] font-mono text-blue-400">{isQuizModule ? level.kind === 'boolean' ? 'Vero/Falso' : 'Scelta Multipla' : 'PostgreSQL/MySQL'}</span>
                 </div>
-                {/* L'editor di testo */}
-                <textarea value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Scrivi qui la tua query..." className="flex-1 w-full bg-transparent text-green-400 font-mono p-2 sm:p-3 focus:outline-none resize-none text-sm sm:text-base selection:bg-blue-500/30" spellCheck="false" />
+                {isQuizModule ? (
+                  <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-2 sm:space-y-3">
+                    {level.options.map(option => (
+                      <button
+                        key={option}
+                        onClick={() => { setSelectedAnswer(option); if (aiFeedback && !isAiLoading) setAiFeedback(null); }}
+                        className={`w-full text-left p-3 sm:p-4 rounded-xl border text-xs sm:text-sm font-semibold transition-all ${selectedAnswer === option ? 'bg-blue-600/25 border-blue-400 text-white shadow-[0_0_18px_rgba(59,130,246,0.18)]' : 'bg-slate-800/60 border-slate-700 text-slate-300 hover:bg-slate-800 hover:border-slate-500'}`}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <textarea value={query} onChange={(e) => { setQuery(e.target.value); if (aiFeedback && !isAiLoading) setAiFeedback(null); }} placeholder="Scrivi qui la tua query..." className="flex-1 w-full bg-transparent text-green-400 font-mono p-2 sm:p-3 focus:outline-none resize-none text-sm sm:text-base selection:bg-blue-500/30" spellCheck="false" />
+                )}
               </div>
               <div className="mt-2 sm:mt-3 flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-2 flex-none">
-                <button onClick={handleRunQuery} className="flex justify-center items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-3 sm:px-4 py-2 rounded-md font-bold text-xs sm:text-sm transition-all hover:shadow-[0_0_15px_rgba(59,130,246,0.4)] active:scale-95"><Play size={14} className="sm:w-4 sm:h-4" /> Esegui Query</button>
+                <button onClick={isQuizModule ? handleSubmitQuiz : handleRunQuery} className="flex justify-center items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-3 sm:px-4 py-2 rounded-md font-bold text-xs sm:text-sm transition-all hover:shadow-[0_0_15px_rgba(59,130,246,0.4)] active:scale-95"><Play size={14} className="sm:w-4 sm:h-4" /> {isQuizModule ? 'Conferma Risposta' : 'Esegui Query'}</button>
                 {(output?.type === 'success' || output?.type === 'table') && (
                   <button onClick={handleNextLevel} className="flex justify-center items-center gap-1.5 bg-green-600 hover:bg-green-500 text-white px-3 sm:px-4 py-2 rounded-md font-bold text-xs sm:text-sm transition-all animate-pulse hover:animate-none">
-                    {currentSubLevelIndex < activeMacro.levels.length - 1 ? 'Prossima Query' : 'Completa Modulo'} <ChevronRight size={14} className="sm:w-4 sm:h-4" />
+                    {currentSubLevelIndex < activeLevels.length - 1 ? (isQuizModule ? 'Prossima Domanda' : 'Prossima Query') : (isQuizModule ? 'Completa Quiz' : 'Completa Modulo')} <ChevronRight size={14} className="sm:w-4 sm:h-4" />
                   </button>
                 )}
               </div>
@@ -822,14 +829,14 @@ export default function App() {
             {/* CONSOLE: Altezza fissa e garantita su mobile per prevenire overlap e scivolare fluidamente in basso */}
             <div className="flex-none h-48 sm:h-56 lg:h-[35%] lg:min-h-[140px] bg-black border-t border-slate-800 p-2.5 sm:p-3 font-mono text-[11px] sm:text-xs overflow-y-auto">
               <div className="text-slate-500 mb-1.5 sm:mb-2">-- Output Console</div>
-              {!output && <div className="text-slate-600 italic">In attesa di esecuzione...</div>}
+              {!output && <div className="text-slate-600 italic">{isQuizModule ? 'In attesa della risposta...' : 'In attesa di esecuzione...'}</div>}
               {output?.type === 'error' && (
                 <div className="flex flex-col gap-2 sm:gap-3 mb-3 sm:mb-4">
                   <div className="flex items-start gap-1.5 sm:gap-2 text-red-400 bg-red-950/30 p-2 sm:p-3 rounded border border-red-900/50"><XCircle size={14} className="sm:w-4 sm:h-4 mt-0.5 flex-shrink-0" /><span>{output.message}</span></div>
                   {!aiFeedback && !isAiLoading && (
                     <button onClick={handleAskAI} className="self-start flex items-center gap-1.5 sm:gap-2 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 px-2 sm:px-3 py-1 sm:py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-colors"><Sparkles size={12} className="sm:w-[14px] sm:h-[14px] text-indigo-400" />Chiedi un indizio al Tutor AI ✨</button>
                   )}
-                  {isAiLoading && <div className="flex items-center gap-1.5 sm:gap-2 text-indigo-400 bg-indigo-950/20 p-2 sm:p-3 rounded border border-indigo-900/50 animate-pulse"><Loader2 size={14} className="sm:w-4 sm:h-4 animate-spin" /><span>Il Tutor AI sta analizzando la tua query...</span></div>}
+                  {isAiLoading && <div className="flex items-center gap-1.5 sm:gap-2 text-indigo-400 bg-indigo-950/20 p-2 sm:p-3 rounded border border-indigo-900/50 animate-pulse"><Loader2 size={14} className="sm:w-4 sm:h-4 animate-spin" /><span>Il Tutor AI sta analizzando {isQuizModule ? 'la tua risposta' : 'la tua query'}...</span></div>}
                   {aiFeedback && (
                     <div className="flex items-start gap-1.5 sm:gap-2 text-indigo-200 bg-indigo-900/30 p-2.5 sm:p-3 rounded-lg border border-indigo-500/40 shadow-inner relative overflow-hidden">
                       <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-400 to-purple-500"></div><Bot size={14} className="sm:w-4 sm:h-4 mt-0.5 flex-shrink-0 text-indigo-400" /><span className="leading-relaxed whitespace-pre-wrap">{aiFeedback}</span>
@@ -844,33 +851,63 @@ export default function App() {
             </div>
           </div>
           
-          {/* PANNELLO DESTRO (DATABASE/ER). Flex-none su mobile per permettere scroll della pagina. */}
+          {/* PANNELLO DESTRO (DATABASE/ER o riepilogo teoria). Flex-none su mobile per permettere scroll della pagina. */}
           <div className="w-full lg:w-1/2 flex-none lg:flex-1 bg-slate-900 p-3 sm:p-4 min-h-[50vh] lg:min-h-0 lg:h-full overflow-y-auto flex flex-col border-t lg:border-t-0 border-slate-800">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-3 sm:mb-4 gap-2 flex-none">
-              <div className="flex items-center gap-1.5 sm:gap-2 text-slate-300">
-                {viewMode === 'data' ? <Database size={16} className="sm:w-[18px] sm:h-[18px] text-blue-400" /> : <Network size={16} className="sm:w-[18px] sm:h-[18px] text-indigo-400" />}
-                <h2 className="text-base sm:text-lg font-bold">{viewMode === 'data' ? 'Database Corrente' : 'Modello E-R'}</h2>
-              </div>
-              <div className="flex w-full sm:w-auto bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-inner">
-                 <button onClick={() => setViewMode('data')} className={`flex-1 sm:flex-none justify-center px-2 sm:px-3 py-1 sm:py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all flex items-center gap-1 sm:gap-1.5 ${viewMode === 'data' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}><TableIcon size={12} className="sm:w-[14px] sm:h-[14px]" /> Dati</button>
-                 <button onClick={() => setViewMode('er')} className={`flex-1 sm:flex-none justify-center px-2 sm:px-3 py-1 sm:py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all flex items-center gap-1 sm:gap-1.5 ${viewMode === 'er' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}><Network size={12} className="sm:w-[14px] sm:h-[14px]" /> Grafico</button>
-              </div>
-            </div>
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
-              {viewMode === 'data' ? (
-                <div className="space-y-3 sm:space-y-4">
-                  {Object.entries(db).map(([tableName, data]) => renderTable(tableName, data))}
-                  <div className="mt-6 sm:mt-8 bg-slate-800/50 rounded-lg p-2.5 sm:p-3 border border-slate-700/50">
-                    <h3 className="text-[10px] sm:text-xs font-bold text-slate-400 mb-1.5 sm:mb-2 uppercase tracking-wider">Legenda Struttura</h3>
-                    <ul className="text-[9px] sm:text-xs space-y-1.5 sm:space-y-2 text-slate-400 font-mono">
-                      <li className="flex items-center gap-1.5 sm:gap-2"><Key size={8} className="sm:w-[10px] sm:h-[10px] text-amber-400" /> Primary Key</li>
-                      <li className="flex items-center gap-1.5 sm:gap-2"><Key size={8} className="sm:w-[10px] sm:h-[10px] text-slate-400" /> Foreign Key</li>
-                      <li className="flex items-center gap-1.5 sm:gap-2"><span className="text-slate-500 italic font-bold bg-slate-900 px-1 sm:px-1.5 py-0.5 rounded border border-slate-700">NULL</span> Assenza di dato</li>
-                    </ul>
+            {isQuizModule ? (
+              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
+                <div className="flex items-center gap-1.5 sm:gap-2 text-slate-300 flex-none">
+                  <BookOpen size={16} className="sm:w-[18px] sm:h-[18px] text-cyan-400" />
+                  <h2 className="text-base sm:text-lg font-bold">Scheda Teoria</h2>
+                </div>
+                <div className="bg-slate-800/80 border border-slate-700 rounded-2xl p-4 sm:p-5 shadow-inner">
+                  <span className="text-cyan-300 font-mono text-[10px] sm:text-xs uppercase tracking-wider font-bold">Argomento</span>
+                  <h3 className="text-xl sm:text-2xl font-black text-white mt-1 mb-3">{level.hint.title}</h3>
+                  <p className="text-slate-300 text-sm sm:text-base leading-relaxed">{level.hint.theory}</p>
+                </div>
+                <div className="bg-black/50 border border-slate-700 rounded-2xl p-4 sm:p-5">
+                  <span className="text-slate-500 font-mono text-[10px] sm:text-xs uppercase tracking-wider font-bold">Avanzamento quiz</span>
+                  <div className="mt-3 grid grid-cols-5 gap-2">
+                    {activeLevels.map((item, idx) => (
+                      <div key={item.id} className={`h-10 rounded-lg border flex items-center justify-center text-xs font-black ${idx < currentSubLevelIndex ? 'bg-green-500/20 border-green-500/50 text-green-300' : idx === currentSubLevelIndex ? 'bg-blue-500/20 border-blue-400/60 text-blue-200' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>
+                        {idx + 1}
+                      </div>
+                    ))}
                   </div>
                 </div>
-              ) : <ERDiagram db={db} />}
-            </div>
+                <div className="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl p-4 sm:p-5">
+                  <h3 className="text-indigo-200 font-bold mb-2 text-sm sm:text-base">Regola quiz</h3>
+                  <p className="text-slate-300 text-xs sm:text-sm leading-relaxed">Ogni conferma sbagliata conta come tentativo. Puoi usare il Tutor AI, ma applica la stessa penalità dei livelli SQL.</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-3 sm:mb-4 gap-2 flex-none">
+                  <div className="flex items-center gap-1.5 sm:gap-2 text-slate-300">
+                    {viewMode === 'data' ? <Database size={16} className="sm:w-[18px] sm:h-[18px] text-blue-400" /> : <Network size={16} className="sm:w-[18px] sm:h-[18px] text-indigo-400" />}
+                    <h2 className="text-base sm:text-lg font-bold">{viewMode === 'data' ? 'Database Corrente' : 'Modello E-R'}</h2>
+                  </div>
+                  <div className="flex w-full sm:w-auto bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-inner">
+                    <button onClick={() => setViewMode('data')} className={`flex-1 sm:flex-none justify-center px-2 sm:px-3 py-1 sm:py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all flex items-center gap-1 sm:gap-1.5 ${viewMode === 'data' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}><TableIcon size={12} className="sm:w-[14px] sm:h-[14px]" /> Dati</button>
+                    <button onClick={() => setViewMode('er')} className={`flex-1 sm:flex-none justify-center px-2 sm:px-3 py-1 sm:py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all flex items-center gap-1 sm:gap-1.5 ${viewMode === 'er' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}><Network size={12} className="sm:w-[14px] sm:h-[14px]" /> Grafico</button>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+                  {viewMode === 'data' ? (
+                    <div className="space-y-3 sm:space-y-4">
+                      {Object.entries(db).map(([tableName, data]) => renderTable(tableName, data))}
+                      <div className="mt-6 sm:mt-8 bg-slate-800/50 rounded-lg p-2.5 sm:p-3 border border-slate-700/50">
+                        <h3 className="text-[10px] sm:text-xs font-bold text-slate-400 mb-1.5 sm:mb-2 uppercase tracking-wider">Legenda Struttura</h3>
+                        <ul className="text-[9px] sm:text-xs space-y-1.5 sm:space-y-2 text-slate-400 font-mono">
+                          <li className="flex items-center gap-1.5 sm:gap-2"><Key size={8} className="sm:w-[10px] sm:h-[10px] text-amber-400" /> Primary Key</li>
+                          <li className="flex items-center gap-1.5 sm:gap-2"><Key size={8} className="sm:w-[10px] sm:h-[10px] text-slate-400" /> Foreign Key</li>
+                          <li className="flex items-center gap-1.5 sm:gap-2"><span className="text-slate-500 italic font-bold bg-slate-900 px-1 sm:px-1.5 py-0.5 rounded border border-slate-700">NULL</span> Assenza di dato</li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : <ERDiagram db={db} />}
+                </div>
+              </>
+            )}
           </div>
         </main>
       )}
